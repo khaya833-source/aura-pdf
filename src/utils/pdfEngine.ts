@@ -128,6 +128,31 @@ export async function exportEditedPDF({
     }
 
     const { width, height } = copiedPage.getSize();
+
+    // Apply Page Background Color (if customized)
+    if (pageInfo.backgroundColor && pageInfo.backgroundColor.toLowerCase() !== '#ffffff') {
+      copiedPage.drawRectangle({
+        x: 0,
+        y: 0,
+        width,
+        height,
+        color: hexToRgb(pageInfo.backgroundColor),
+        opacity: 0.18, // Tint blend preserving underlying text
+      });
+    }
+
+    // Apply Page Crop (removes outer content by setting CropBox & MediaBox)
+    if (pageInfo.crop && pageInfo.crop.width > 0 && pageInfo.crop.height > 0) {
+      const cropW = (pageInfo.crop.width / 100) * width;
+      const cropH = (pageInfo.crop.height / 100) * height;
+      const cropX = (pageInfo.crop.x / 100) * width;
+      // Invert Y coordinate for PDF coordinate system (origin bottom-left)
+      const cropY = height - ((pageInfo.crop.y + pageInfo.crop.height) / 100) * height;
+
+      copiedPage.setCropBox(cropX, cropY, cropW, cropH);
+      copiedPage.setMediaBox(cropX, cropY, cropW, cropH);
+    }
+
     const pageAnnotations = annotations.filter((a) => a.pageNumber === pageInfo.pageNumber);
 
     // Render annotations for this page
@@ -168,13 +193,76 @@ export async function exportEditedPDF({
         if (ann.text) {
           const textColor = hexToRgb(ann.fontColor || '#1e293b');
           const fontSize = ann.fontSize || 13;
-          copiedPage.drawText(ann.text, {
+
+          // Select matching standard PDF font
+          let selectedFont = fontRegular;
+          if (ann.fontFamily?.includes('Times') || ann.fontFamily?.includes('Georgia')) {
+            selectedFont = ann.isBold ? fontBold : fontRegular;
+          } else if (ann.fontFamily?.includes('Courier')) {
+            selectedFont = fontMono;
+          } else {
+            selectedFont = ann.isBold ? fontBold : fontRegular;
+          }
+
+          const displayText = (ann.bulletType === 'bullet' ? '• ' : ann.bulletType === 'number' ? '1. ' : '') + ann.text;
+          const textWidth = selectedFont.widthOfTextAtSize(displayText, fontSize);
+
+          // Draw highlight background if specified
+          if (ann.highlightBgColor && ann.highlightBgColor !== 'transparent') {
+            copiedPage.drawRectangle({
+              x: absX - 2,
+              y: absY - fontSize - 2,
+              width: textWidth + 4,
+              height: fontSize + 4,
+              color: hexToRgb(ann.highlightBgColor),
+              opacity: 0.5,
+            });
+          }
+
+          // Draw text
+          copiedPage.drawText(displayText, {
             x: absX,
             y: absY - fontSize,
             size: fontSize,
-            font: ann.isBold ? fontBold : fontRegular,
+            font: selectedFont,
             color: textColor,
           });
+
+          // Draw Underline if enabled
+          if (ann.isUnderline) {
+            copiedPage.drawLine({
+              start: { x: absX, y: absY - fontSize - 2 },
+              end: { x: absX + textWidth, y: absY - fontSize - 2 },
+              thickness: 1,
+              color: textColor,
+            });
+          }
+
+          // Draw Strikethrough if enabled
+          if (ann.isStrikethrough) {
+            copiedPage.drawLine({
+              start: { x: absX, y: absY - fontSize / 2 },
+              end: { x: absX + textWidth, y: absY - fontSize / 2 },
+              thickness: 1,
+              color: textColor,
+            });
+          }
+        }
+      } else if (ann.type === 'image' && ann.imageDataUrl) {
+        try {
+          const isPng = ann.imageDataUrl.startsWith('data:image/png');
+          const base64Data = ann.imageDataUrl.split(',')[1];
+          const imageBytes = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
+          const embeddedImg = isPng ? await exportedDoc.embedPng(imageBytes) : await exportedDoc.embedJpg(imageBytes);
+          const targetPdfY = height - ((ann.y + (ann.height || 20)) / 100) * height;
+          copiedPage.drawImage(embeddedImg, {
+            x: absX,
+            y: targetPdfY,
+            width: annWidth,
+            height: annHeight,
+          });
+        } catch (imgErr) {
+          console.error('Failed to embed image:', imgErr);
         }
       } else if (ann.type === 'shape') {
         const strokeColor = hexToRgb(ann.strokeColor || '#2563eb');

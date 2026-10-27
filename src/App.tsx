@@ -11,6 +11,10 @@ import type {
   WatermarkConfig,
   PageNumberConfig,
   DocumentMetadata,
+  CropRegion,
+  WordFormatting,
+  DeviceMode,
+  ThemeMode,
 } from './types/pdf';
 
 import { TopBar } from './components/TopBar';
@@ -23,6 +27,9 @@ import { ThumbnailFilmstrip } from './components/ThumbnailFilmstrip';
 import { SearchPanel } from './components/SearchPanel';
 import { SignatureModal } from './components/SignatureModal';
 import { SamplePickerModal } from './components/SamplePickerModal';
+import { GeminiChatDrawer } from './components/GeminiChatDrawer';
+import { WordRibbonToolbar } from './components/WordRibbonToolbar';
+import { AndroidTouchBar } from './components/AndroidTouchBar';
 
 import {
   ZoomIn,
@@ -56,6 +63,7 @@ export default function App() {
   const [zoom, setZoom] = useState<number>(1.25);
   const [isFilmstripOpen, setIsFilmstripOpen] = useState<boolean>(true);
   const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
+  const [isGeminiOpen, setIsGeminiOpen] = useState<boolean>(false);
   const [isSignatureModalOpen, setIsSignatureModalOpen] = useState<boolean>(false);
   const [isSampleModalOpen, setIsSampleModalOpen] = useState<boolean>(false);
   const [isExporting, setIsExporting] = useState<boolean>(false);
@@ -69,6 +77,43 @@ export default function App() {
   const [strokeWidth, setStrokeWidth] = useState<number>(2);
   const [fontSize, setFontSize] = useState<number>(14);
   const [activeSignatureUrl, setActiveSignatureUrl] = useState<string | null>(null);
+
+  // Device Mode (Laptop Mode vs Android Mode)
+  const [deviceMode, setDeviceMode] = useState<DeviceMode>('laptop');
+
+  // Theme Mode (Dark Mode vs Light Mode)
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    try {
+      const saved = localStorage.getItem('aurapdf_theme');
+      return saved === 'light' ? 'light' : 'dark';
+    } catch {
+      return 'dark';
+    }
+  });
+
+  const handleToggleTheme = () => {
+    setTheme((prev) => {
+      const next = prev === 'dark' ? 'light' : 'dark';
+      try {
+        localStorage.setItem('aurapdf_theme', next);
+      } catch {}
+      return next;
+    });
+  };
+
+  // Microsoft Word Formatting state
+  const [wordFormatting, setWordFormatting] = useState<WordFormatting>({
+    fontFamily: 'Calibri, sans-serif',
+    fontSize: 13,
+    fontColor: '#0f172a',
+    isBold: false,
+    isItalic: false,
+    isUnderline: false,
+    isStrikethrough: false,
+    textAlign: 'left',
+    highlightBgColor: 'transparent',
+    bulletType: 'none',
+  });
 
   // Annotations & History (Undo / Redo)
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -93,6 +138,27 @@ export default function App() {
     fontSize: 9,
     color: '#64748b',
   });
+
+  // Sync theme to root html element
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [theme]);
+
+  // Keyboard shortcut Alt+T to toggle theme
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && (e.key === 't' || e.key === 'T')) {
+        e.preventDefault();
+        handleToggleTheme();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Load sample document on initial mount
   useEffect(() => {
@@ -128,9 +194,12 @@ export default function App() {
           pageNumber: i,
           width: p.view[2],
           height: p.view[3],
+          originalWidth: p.view[2],
+          originalHeight: p.view[3],
           originalRotation: p.rotate,
           currentRotation: 0,
           orderIndex: i - 1,
+          backgroundColor: '#ffffff',
         });
       }
       setPagesInfo(initialPages);
@@ -173,9 +242,12 @@ export default function App() {
           pageNumber: i,
           width: p.view[2],
           height: p.view[3],
+          originalWidth: p.view[2],
+          originalHeight: p.view[3],
           originalRotation: p.rotate,
           currentRotation: 0,
           orderIndex: i - 1,
+          backgroundColor: '#ffffff',
         });
       }
       setPagesInfo(pagesList);
@@ -247,6 +319,168 @@ export default function App() {
     setAnnotations(next);
     setSelectedAnnotationId(null);
   }, [redoStack, annotations]);
+
+  // Crop handlers
+  const handleApplyCrop = (cropRegion: CropRegion) => {
+    setUndoStack((prev) => [...prev, annotations]);
+    setPagesInfo((prev) =>
+      prev.map((page) => {
+        if (page.pageNumber === currentPage) {
+          const origW = page.originalWidth || page.width;
+          const origH = page.originalHeight || page.height;
+          return {
+            ...page,
+            crop: cropRegion,
+            originalWidth: origW,
+            originalHeight: origH,
+            width: (cropRegion.width / 100) * origW,
+            height: (cropRegion.height / 100) * origH,
+          };
+        }
+        return page;
+      })
+    );
+    setActiveTool('select');
+  };
+
+  const handleResetCrop = (targetPageNumber: number) => {
+    setPagesInfo((prev) =>
+      prev.map((page) => {
+        if (page.pageNumber === targetPageNumber) {
+          return {
+            ...page,
+            crop: undefined,
+            width: page.originalWidth || page.width,
+            height: page.originalHeight || page.height,
+          };
+        }
+        return page;
+      })
+    );
+  };
+
+  const handleCancelCrop = () => {
+    setActiveTool('select');
+  };
+
+  // Page Color handler
+  const handleSelectPageColor = (color: string, applyToAll: boolean) => {
+    setPagesInfo((prev) =>
+      prev.map((page) => {
+        if (applyToAll || page.pageNumber === currentPage) {
+          return {
+            ...page,
+            backgroundColor: color,
+          };
+        }
+        return page;
+      })
+    );
+  };
+
+  // Live document + annotation text word and character counts
+  const totalTextContent = React.useMemo(() => {
+    const docStr = documentText.map((d) => d.text).join(' ');
+    const annStr = annotations
+      .filter((a) => a.type === 'text')
+      .map((a) => a.text || '')
+      .join(' ');
+    return (docStr + ' ' + annStr).trim();
+  }, [documentText, annotations]);
+
+  const wordCount = React.useMemo(() => {
+    if (!totalTextContent) return 0;
+    return totalTextContent.split(/\s+/).filter(Boolean).length;
+  }, [totalTextContent]);
+
+  const charCount = React.useMemo(() => {
+    return totalTextContent.length;
+  }, [totalTextContent]);
+
+  const handleToggleDeviceMode = () => {
+    setDeviceMode((prev) => (prev === 'laptop' ? 'android' : 'laptop'));
+  };
+
+  const handleUpdateWordFormatting = (updates: Partial<WordFormatting>) => {
+    setWordFormatting((prev) => ({ ...prev, ...updates }));
+    if (selectedAnnotationId) {
+      const selectedAnn = annotations.find((a) => a.id === selectedAnnotationId);
+      if (selectedAnn && selectedAnn.type === 'text') {
+        const updatedFields: Partial<Annotation> = {};
+        if (updates.fontFamily !== undefined) updatedFields.fontFamily = updates.fontFamily;
+        if (updates.fontSize !== undefined) updatedFields.fontSize = updates.fontSize;
+        if (updates.fontColor !== undefined) updatedFields.fontColor = updates.fontColor;
+        if (updates.isBold !== undefined) updatedFields.isBold = updates.isBold;
+        if (updates.isItalic !== undefined) updatedFields.isItalic = updates.isItalic;
+        if (updates.isUnderline !== undefined) updatedFields.isUnderline = updates.isUnderline;
+        if (updates.isStrikethrough !== undefined) updatedFields.isStrikethrough = updates.isStrikethrough;
+        if (updates.textAlign !== undefined) updatedFields.textAlign = updates.textAlign;
+        if (updates.highlightBgColor !== undefined) updatedFields.highlightBgColor = updates.highlightBgColor;
+        if (updates.bulletType !== undefined) updatedFields.bulletType = updates.bulletType;
+        handleUpdateAnnotation(selectedAnnotationId, updatedFields);
+      }
+    }
+  };
+
+  const handleInsertImage = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      if (!dataUrl) return;
+      const newAnn: Annotation = {
+        id: `img_${Date.now()}`,
+        pageNumber: currentPage,
+        type: 'image',
+        x: 25,
+        y: 25,
+        width: 38,
+        height: 28,
+        imageDataUrl: dataUrl,
+        timestamp: Date.now(),
+      };
+      handleAddAnnotation(newAnn);
+      setSelectedAnnotationId(newAnn.id);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleInsertWordPreset = (type: 'callout' | 'quote' | 'clause') => {
+    let text = '';
+    let bg = '#eff6ff';
+    let color = '#1e3a8a';
+    if (type === 'callout') {
+      text = '💡 NOTE: All deliverables and timelines are subject to mutual review and approval.';
+      bg = '#fef9c3';
+      color = '#854d0e';
+    } else if (type === 'quote') {
+      text = '“Excellence in every clause: clarity, precision, and mutual trust.”';
+      bg = '#f8fafc';
+      color = '#334155';
+    } else {
+      text = 'SECTION 14. COMPLIANCE & GOVERNANCE. The parties shall adhere to all applicable industry standards and regulatory statutory guidelines.';
+      bg = '#f1f5f9';
+      color = '#0f172a';
+    }
+
+    const newAnn: Annotation = {
+      id: `preset_${Date.now()}`,
+      pageNumber: currentPage,
+      type: 'text',
+      x: 15,
+      y: 20,
+      text,
+      fontSize: 13,
+      fontFamily: wordFormatting.fontFamily,
+      fontColor: color,
+      highlightBgColor: bg,
+      boxStyle: type,
+      isItalic: type === 'quote',
+      isBold: false,
+      timestamp: Date.now(),
+    };
+    handleAddAnnotation(newAnn);
+    setSelectedAnnotationId(newAnn.id);
+  };
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -334,6 +568,8 @@ export default function App() {
         onOpenSampleModal={() => setIsSampleModalOpen(true)}
         onToggleSearch={() => setIsSearchOpen((s) => !s)}
         isSearchOpen={isSearchOpen}
+        isGeminiOpen={isGeminiOpen}
+        onToggleGemini={() => setIsGeminiOpen((o) => !o)}
         onExportPDF={handleExportPDF}
         isExporting={isExporting}
         zoom={zoom}
@@ -342,7 +578,21 @@ export default function App() {
         totalPages={activePages.length}
         onJumpToPage={setCurrentPage}
         onPrint={handlePrint}
+        deviceMode={deviceMode}
+        onToggleDeviceMode={handleToggleDeviceMode}
       />
+
+      {/* Microsoft Word Ribbon Toolbar */}
+      {activeTab === 'editor' && (
+        <WordRibbonToolbar
+          formatting={wordFormatting}
+          onChangeFormatting={handleUpdateWordFormatting}
+          deviceMode={deviceMode}
+          wordCount={wordCount}
+          charCount={charCount}
+          onInsertWordPreset={handleInsertWordPreset}
+        />
+      )}
 
       {/* Main Workspace Body */}
       <div className="flex-1 flex overflow-hidden relative">
@@ -422,6 +672,11 @@ export default function App() {
                     onRedo={handleRedo}
                     onOpenSignatureModal={() => setIsSignatureModalOpen(true)}
                     hasActiveSignature={!!activeSignatureUrl}
+                    onInsertImage={handleInsertImage}
+                    currentPageColor={activePageInfo?.backgroundColor || '#ffffff'}
+                    onSelectPageColor={handleSelectPageColor}
+                    isCurrentPageCropped={!!activePageInfo?.crop}
+                    onResetPageCrop={() => handleResetCrop(currentPage)}
                   />
                 </div>
 
@@ -482,6 +737,8 @@ export default function App() {
                           pageNumber={activePageInfo.pageNumber}
                           scale={zoom}
                           rotation={activePageInfo.currentRotation || 0}
+                          crop={activePageInfo.crop}
+                          backgroundColor={activePageInfo.backgroundColor || '#ffffff'}
                           annotations={annotations.filter((a) => a.pageNumber === activePageInfo.pageNumber)}
                           activeTool={activeTool}
                           selectedShape={selectedShape}
@@ -490,12 +747,16 @@ export default function App() {
                           highlightColor={highlightColor}
                           strokeWidth={strokeWidth}
                           fontSize={fontSize}
+                          wordFormatting={wordFormatting}
                           activeSignatureUrl={activeSignatureUrl}
                           onAddAnnotation={handleAddAnnotation}
                           onUpdateAnnotation={handleUpdateAnnotation}
                           onDeleteAnnotation={handleDeleteAnnotation}
                           selectedAnnotationId={selectedAnnotationId}
                           onSelectAnnotation={setSelectedAnnotationId}
+                          onApplyCrop={handleApplyCrop}
+                          onResetCrop={() => handleResetCrop(currentPage)}
+                          onCancelCrop={handleCancelCrop}
                         />
 
                         {/* Visual page indicator pill */}
@@ -606,7 +867,27 @@ export default function App() {
           onSelectSample={loadSampleDocument}
           currentSampleId={currentSampleId}
         />
+
+        {/* Gemini AI Copilot Chat Drawer */}
+        <GeminiChatDrawer
+          isOpen={isGeminiOpen}
+          onClose={() => setIsGeminiOpen(false)}
+          documentName={metadata.name}
+          documentText={documentText}
+        />
       </div>
+
+      {/* Android Touch Bar (Visible in Android Mode) */}
+      {deviceMode === 'android' && (
+        <AndroidTouchBar
+          activeTool={activeTool}
+          onSelectTool={setActiveTool}
+          onToggleGemini={() => setIsGeminiOpen((o) => !o)}
+          isGeminiOpen={isGeminiOpen}
+          onDownload={handleExportPDF}
+          onToggleDeviceMode={handleToggleDeviceMode}
+        />
+      )}
     </div>
   );
 }
