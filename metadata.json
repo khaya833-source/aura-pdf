@@ -1,0 +1,6 @@
+{
+  "name": "AuraPDF Studio",
+  "description": "Next-generation PDF editor and workspace featuring real-time annotations, digital signatures, page organization, merging, redaction, watermarks, and high-fidelity PDF export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
